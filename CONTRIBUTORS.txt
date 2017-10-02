@@ -9,4 +9,4 @@ Contributors:
 	* JUnit tests, gradle support
 
 	Mohamed Taher Alrefaie <m.taher@msn.com>
-	* Integration, gradle support
+	* Integration, gradle support, JUnit tests, Kryo support to load and save classifiers
