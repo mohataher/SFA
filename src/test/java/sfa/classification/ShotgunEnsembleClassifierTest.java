@@ -7,11 +7,13 @@ public class ShotgunEnsembleClassifierTest extends AbstractClassifierTest{
     @Override
     protected List<DataSet> getDataSets() {
         List<DataSet> dataSets=new ArrayList<>();
-        //Coffee;BOSS Ensemble;1.0;1.0
+        //variable_length;Shotgun Ensemble;0.929;0.857
+        dataSets.add(new DataSet("variable_length", 0.929, 0.857));
+        //Coffee;Shotgun Ensemble;1.0;0.929
         dataSets.add(new DataSet("Coffee", 1.0, 0.929));
-        //Beef;BOSS Ensemble;1.0;0.733
+        //Beef;Shotgun Ensemble;0.667;0.9
         dataSets.add(new DataSet("Beef", 0.667,0.9));
-        //CBF;BOSS Ensemble;1.0;0.999
+        //CBF;Shotgun Ensemble;0.967;0.991
         dataSets.add(new DataSet("CBF", 0.967, 0.991));
         return dataSets;
     }

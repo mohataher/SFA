@@ -43,14 +43,14 @@ public class TimeSeriesLoader {
         String[] columns = line.split(" ");
         double[] data = new double[columns.length];
         int j = 0;
-        String label = null;
+        Double label = null;
 
         // first is the label
         int i = 0;
         for (; i < columns.length; i++) {
           String column = columns[i].trim();
           if (isNonEmptyColumn(column)) {
-            label = column;
+            label = Double.valueOf(column);
             break;
           }
         }
@@ -81,6 +81,94 @@ public class TimeSeriesLoader {
     return samples.toArray(new TimeSeries[]{});
   }
 
+  public static MultiVariateTimeSeries[] loadMultivariateDatset(
+      File dataset, boolean derivatives) throws IOException {
+
+    List<MultiVariateTimeSeries> samples = new ArrayList<>();
+    List<Double>[] mts = null;
+    int lastId = -1;
+
+    try (BufferedReader br = new BufferedReader(new FileReader(dataset))) {
+      String line = null;
+      double label = -1;
+      while ((line = br.readLine()) != null) {
+        String[] columns = line.split(" ");
+
+        // id
+        int id = Integer.valueOf(columns[0].trim());
+        if (id != lastId) {
+          addMTS(samples, mts, label);
+
+          // initialize
+          lastId = id;
+          mts = new ArrayList[columns.length - 3];
+          for (int i = 0; i < mts.length; i++) {
+            mts[i] = new ArrayList<>();
+          }
+          // label
+          label = Double.valueOf(columns[2].trim());
+        }
+
+        // timeStamp
+        /* int timeStamp = Integer.valueOf(columns[1].trim()); */
+
+        // the data
+        for (int dim = 0; dim < columns.length - 3; dim++) { // all dimensions
+          String column = columns[dim + 3].trim();
+          try {
+            double d = Double.parseDouble(column);
+            mts[dim].add(d);
+          } catch (NumberFormatException nfe) {
+            nfe.printStackTrace();
+          }
+        }
+      }
+
+      addMTS(samples, mts, label);
+    } catch (IOException e) {
+      e.printStackTrace();
+    }
+
+    System.out.println("Done reading from " + dataset
+        + " samples " + samples.size()
+        + " dimensions " + samples.get(0).getDimensions());
+
+    MultiVariateTimeSeries[] m = samples.toArray(new MultiVariateTimeSeries[]{});
+    return (derivatives)? getDerivatives(m) : m;
+  }
+
+  protected static MultiVariateTimeSeries[] getDerivatives(MultiVariateTimeSeries[] mtsSamples) {
+    for (MultiVariateTimeSeries mts : mtsSamples) {
+      TimeSeries[] deltas = new TimeSeries[2 * mts.timeSeries.length];
+      TimeSeries[] samples = mts.timeSeries;
+      for (int a = 0; a < samples.length; a++) {
+        TimeSeries s = samples[a];
+        double[] d = new double[s.getLength() - 1];
+        for (int i = 1; i < s.getLength(); i++) {
+          d[i - 1] = s.getData()[i] - s.getData()[i - 1];
+        }
+        deltas[2 * a] = samples[a];
+        deltas[2 * a + 1] = new TimeSeries(d, mts.getLabel());
+      }
+      mts.timeSeries = deltas;
+    }
+    return mtsSamples;
+  }
+
+  protected static void addMTS(List<MultiVariateTimeSeries> samples, List<Double>[] mts, double label) {
+    if (mts != null && mts[0].size() > 0) {
+      TimeSeries[] dimensions = new TimeSeries[mts.length];
+      for (int i = 0; i < dimensions.length; i++) {
+        double[] rawdata = new double[mts[i].size()];
+        int j = 0;
+        for (double d : mts[i]) {
+          rawdata[j++] = d;
+        }
+        dimensions[i] = new TimeSeries(rawdata, label);
+      }
+      samples.add(new MultiVariateTimeSeries(dimensions, label));
+    }
+  }
 
   public static TimeSeries readSampleSubsequence(File dataset) throws IOException {
     try (BufferedReader br = new BufferedReader(new FileReader(dataset))) {

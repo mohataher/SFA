@@ -37,7 +37,7 @@ public class ShotgunClassifier extends Classifier {
       this.samples = samples;
     }
 
-    public TimeSeries[] samples;
+    public TimeSeries[] samples; // the train samples needed for 1-NN classification
   }
 
   public Score eval(
@@ -50,7 +50,7 @@ public class ShotgunClassifier extends Classifier {
     // training score
     if (DEBUG) {
       System.out.println(score.toString());
-      outputResult((int) score.training, startTime, trainSamples.length);
+      outputResult(score.training, startTime, trainSamples.length);
     }
 
     // Classify: testing score
@@ -76,14 +76,14 @@ public class ShotgunClassifier extends Classifier {
     int bestCorrectTraining = 0;
 
     for (boolean normMean : NORMALIZATION) {
-      long startTime = System.currentTimeMillis();
+      //long startTime = System.currentTimeMillis();
 
       // train the shotgun models for different window lengths
       ShotgunModel model = fitEnsemble(trainSamples, normMean, 1.0).getHighestScoringModel();
       Score score = model.score;
 
-      if (model == null || bestCorrectTraining < score.training) {
-        bestCorrectTraining = (int) score.training;
+      if (this.model == null || bestCorrectTraining < score.training) {
+        bestCorrectTraining = score.training;
         bestScore = score;
         this.model = model;
       }
@@ -93,20 +93,19 @@ public class ShotgunClassifier extends Classifier {
     return bestScore;
   }
 
-
   @Override
   public Predictions score(final TimeSeries[] testSamples) {
-    return predict(this.model, testSamples);
+    Double[] labels = predict(testSamples);
+    return evalLabels(testSamples, labels);
   }
 
-
   protected Ensemble<ShotgunModel> fitEnsemble(
-          final TimeSeries[] samples,
+          final TimeSeries[] trainSamples,
           final boolean normMean,
           final double factor) {
 
     int minWindowLength = 5;
-    int maxWindowLength = getMax(samples, MAX_WINDOW_LENGTH);
+    int maxWindowLength = getMax(trainSamples, MAX_WINDOW_LENGTH);
     Integer[] windows = getWindowsBetween(minWindowLength, maxWindowLength);
 
     final AtomicInteger correctTraining = new AtomicInteger(0);
@@ -117,10 +116,11 @@ public class ShotgunClassifier extends Classifier {
       public void run(int id, AtomicInteger processed) {
         for (int i = 0; i < windows.length; i++) {
           if (i % threads == id) {
-            ShotgunModel model = new ShotgunModel(normMean, windows[i], samples);
-            Predictions p = predict( model, samples );
+            ShotgunModel model = new ShotgunModel(normMean, windows[i], trainSamples);
+            Double[] labels = predict(model, trainSamples);
+            Predictions p = evalLabels(trainSamples, labels);
 
-            model.score = new Score(model.name, -1, 1, p.correct.get(), samples.length, windows[i]);
+            model.score = new Score(model.name, -1, 1, p.correct.get(), trainSamples.length, windows[i]);
 
             // keep best scores
             synchronized (correctTraining) {
@@ -142,12 +142,14 @@ public class ShotgunClassifier extends Classifier {
     return filterByFactor(results, correctTraining.get(), factor);
   }
 
+  @Override
+  public Double[] predict(final TimeSeries[] testSamples) {
+    return predict(this.model, testSamples);
+  }
 
-  protected Predictions predict(
-          final ShotgunModel model,
-          final TimeSeries[] testSamples) {
+  protected Double[] predict(ShotgunModel model, final TimeSeries[] testSamples) {
 
-    final Predictions p = new Predictions(new String[testSamples.length], 0);
+    final Double[] p = new Double[testSamples.length];
 
     // calculate means and stds for each sample
     final double[][] means = new double[model.samples.length][];
@@ -163,7 +165,6 @@ public class ShotgunClassifier extends Classifier {
             final TimeSeries query = testSamples[i];
 
             double distanceTo1NN = Double.MAX_VALUE;
-            String predictedLabel = "";
 
             int wQueryLen = Math.min(query.getLength(), model.windowLength);
             TimeSeries[] disjointWindows = query.getDisjointSequences(wQueryLen, model.normed); // possible without copying!?
@@ -194,16 +195,10 @@ public class ShotgunClassifier extends Classifier {
 
                 // choose minimum
                 if (totalDistance < distanceTo1NN) {
-                  predictedLabel = ts.getLabel();
+                  p[i] = ts.getLabel();
                   distanceTo1NN = totalDistance;
                 }
               }
-            }
-
-            // check if the prediction is correct
-            p.labels[i] = predictedLabel;
-            if (compareLabels(testSamples[i].getLabel(), p.labels[i])) {
-              p.correct.incrementAndGet();
             }
           }
         }
@@ -213,7 +208,7 @@ public class ShotgunClassifier extends Classifier {
     return p;
   }
 
-  public static double getEuclideanDistance(
+  protected static double getEuclideanDistance(
           TimeSeries ts,
           TimeSeries q,
           double meanTs,
@@ -240,7 +235,7 @@ public class ShotgunClassifier extends Classifier {
     return distance;
   }
 
-  public static void calcMeansStds(
+  protected static void calcMeansStds(
           final int windowLength,
           final TimeSeries[] trainSamples,
           final double[][] means,

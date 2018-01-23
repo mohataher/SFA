@@ -2,20 +2,14 @@
 // Distributed under the GLP 3.0 (See accompanying file LICENSE)
 package sfa.transformation;
 
-import java.io.IOException;
-import java.io.Serializable;
-
 import com.esotericsoftware.kryo.Kryo;
-import com.esotericsoftware.kryo.KryoSerializable;
-import com.esotericsoftware.kryo.Serializer;
 import com.esotericsoftware.kryo.io.Input;
-import com.esotericsoftware.kryo.io.Output;
-import com.esotericsoftware.kryo.serializers.BeanSerializer;
-import com.esotericsoftware.kryo.serializers.DefaultSerializers;
 import com.esotericsoftware.kryo.serializers.FieldSerializer;
 import org.jtransforms.fft.DoubleFFT_1D;
-
 import sfa.timeseries.TimeSeries;
+
+import java.io.IOException;
+import java.io.Serializable;
 
 /**
  * The Momentary Fourier Transform is alternative algorithm of
@@ -28,9 +22,8 @@ import sfa.timeseries.TimeSeries;
  * derived from recursive matrix transformations. In: Digital Signal Processing
  * Proceedings, 1997., IEEE (1997)
  *
- * @author bzcschae
  */
-public class MFT {
+public class MFT implements Serializable {
   private static final long serialVersionUID = 8508604292241736378L;
 
   private int windowSize = 0;
@@ -38,11 +31,19 @@ public class MFT {
   private double norm = 0;
 
   private transient DoubleFFT_1D fft = null;
+  private boolean useMaxOrMin = false;
 
-  public MFT(){}
+  public MFT() {
+  }
 
   public MFT(int windowSize, boolean normMean, boolean lowerBounding) {
+    this(windowSize, normMean, lowerBounding, false);
+  }
+
+  public MFT(int windowSize, boolean normMean, boolean lowerBounding, boolean useMinOrMax) {
     this.windowSize = windowSize;
+    this.useMaxOrMin = useMinOrMax;
+
     initFFT();
 
     // ignore DC value?
@@ -55,20 +56,21 @@ public class MFT {
    * a single Fourier transform of the time series.
    *
    * @param timeSeries the time series to be transformed
-   * @param l the number of Fourier values to keep
+   * @param l          the number of Fourier values to keep
    * @return the first l Fourier values
    */
   public double[] transform(TimeSeries timeSeries, int l) {
     double[] data = new double[this.windowSize];
-    int windowSize = timeSeries.getLength();
-
-    System.arraycopy(timeSeries.getData(), 0, data, 0, this.windowSize);
+    System.arraycopy(timeSeries.getData(), 0, data, 0, Math.min(this.windowSize, timeSeries.getLength()));
     this.fft.realForward(data);
-    data[1] = 0; // DC-coefficient imag part
+    data[1] = 0; // DC-coefficient imaginary part
 
     // norming
-    double[] copy = new double[Math.min(windowSize - this.startOffset, l)];
-    System.arraycopy(data, this.startOffset, copy, 0, copy.length);
+    double[] copy = new double[l];
+
+    // make it even length for uneven windowSize
+    int length = Math.min(this.windowSize - this.startOffset, l);
+    System.arraycopy(data, this.startOffset, copy, 0, length);
 
     int sign = 1;
     for (int i = 0; i < copy.length; i++) {
@@ -89,16 +91,19 @@ public class MFT {
    *                   coefficients). If l is uneven, l+1 Fourier values are returned. If
    *                   windowSize is smaller than l, only the first windowSize Fourier
    *                   values are set.
-   * @return           returns only the first l/2 Fourier coefficients for each window.
+   * @return returns only the first l/2 Fourier coefficients for each window.
    */
   public double[][] transformWindowing(TimeSeries timeSeries, int l) {
-    int wordLength = l + l % 2 + this.startOffset; // make it even
+    int wordLength = useMaxOrMin ?
+        Math.max(windowSize, l + this.startOffset) : // MUSE uses 'max'
+        Math.min(windowSize, l + this.startOffset); // WEASEL uses 'min'
+    wordLength += wordLength%2; // make it even
     double[] phis = new double[wordLength];
 
     for (int u = 0; u < phis.length; u += 2) {
       double uHalve = -u / 2;
-      phis[u] = realephi(uHalve, this.windowSize);
-      phis[u + 1] = complexephi(uHalve, this.windowSize);
+      phis[u] = realPartEPhi(uHalve, this.windowSize);
+      phis[u + 1] = complexPartEPhi(uHalve, this.windowSize);
     }
 
     // means and stddev for each sliding window
@@ -120,8 +125,8 @@ public class MFT {
           double real1 = (mftData[k] + data[t + this.windowSize - 1] - data[t - 1]);
           double imag1 = (mftData[k + 1]);
 
-          double real = complexMulReal(real1, imag1, phis[k], phis[k + 1]);
-          double imag = complexMulImag(real1, imag1, phis[k], phis[k + 1]);
+          double real = complexMultiplyRealPart(real1, imag1, phis[k], phis[k + 1]);
+          double imag = complexMultiplyImagPart(real1, imag1, phis[k], phis[k + 1]);
 
           mftData[k] = real;
           mftData[k + 1] = imag;
@@ -130,7 +135,7 @@ public class MFT {
       // use the DFT for the first offset
       else {
         double[] dft = new double[this.windowSize];
-        System.arraycopy(timeSeries.getData(), 0, dft, 0, this.windowSize);
+        System.arraycopy(timeSeries.getData(), 0, dft, 0, Math.min(this.windowSize, timeSeries.getLength()));
 
         this.fft.realForward(dft);
         dft[1] = 0; // DC-coefficient imag part
@@ -141,7 +146,7 @@ public class MFT {
 
       // normalization for lower bounding
       double[] copy = new double[l];
-      System.arraycopy(mftData, this.startOffset, copy, 0, l);
+      System.arraycopy(mftData, this.startOffset, copy, 0, Math.min(l, mftData.length-this.startOffset));
 
       transformed[t] = normalizeFT(copy, stds[t]);
     }
@@ -149,24 +154,39 @@ public class MFT {
     return transformed;
   }
 
-  public static double complexMulReal(double r1, double im1, double r2, double im2) {
+  /**
+   * Calculate the real part of a multiplication of two complex numbers
+   */
+  private static double complexMultiplyRealPart(double r1, double im1, double r2, double im2) {
     return r1 * r2 - im1 * im2;
   }
 
-  public static double complexMulImag(double r1, double im1, double r2, double im2) {
+  /**
+   * Caluculate the imaginary part of a multiplication of two complex numbers
+   */
+  private static double complexMultiplyImagPart(double r1, double im1, double r2, double im2) {
     return r1 * im2 + r2 * im1;
   }
 
-  public static double realephi(double u, double M) {
+  /**
+   * Real part of e^(2*pi*u/M)
+   */
+  private static double realPartEPhi(double u, double M) {
     return Math.cos(2 * Math.PI * u / M);
   }
 
-  public static double complexephi(double u, double M) {
+  /**
+   * Imaginary part of e^(2*pi*u/M)
+   */
+  private static double complexPartEPhi(double u, double M) {
     return -Math.sin(2 * Math.PI * u / M);
   }
 
-  public double[] normalizeFT(double[] copy, double std) {
-    double normalisingFactor = (std > 0 ? 1.0 / std : 1.0) * this.norm;
+  /**
+   * Apply normalization to the Fourier coefficients to allow lower bounding in Euclidean space
+   */
+  private double[] normalizeFT(double[] copy, double std) {
+    double normalisingFactor = (TimeSeries.APPLY_Z_NORM && std > 0 ? 1.0 / std : 1.0) * this.norm;
     int sign = 1;
     for (int i = 0; i < copy.length; i++) {
       copy[i] *= sign * normalisingFactor;
@@ -175,12 +195,16 @@ public class MFT {
     return copy;
   }
 
+  public int getStartOffset() {
+    return startOffset;
+  }
+
   private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {
     in.defaultReadObject();
     initFFT();
   }
 
-  public static final class MFTKryoSerializer extends FieldSerializer<MFT>{
+  public static final class MFTKryoSerializer extends FieldSerializer<MFT> {
 
     public MFTKryoSerializer(Kryo kryo) {
       this(kryo, MFT.class);

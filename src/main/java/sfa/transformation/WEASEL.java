@@ -2,24 +2,21 @@
 // Distributed under the GLP 3.0 (See accompanying file LICENSE)
 package sfa.transformation;
 
-import java.util.concurrent.atomic.AtomicInteger;
-
+import com.carrotsearch.hppc.*;
+import com.carrotsearch.hppc.cursors.IntIntCursor;
+import com.carrotsearch.hppc.cursors.LongFloatCursor;
+import sfa.classification.Classifier;
 import sfa.classification.Classifier.Words;
 import sfa.classification.ParallelFor;
 import sfa.timeseries.TimeSeries;
 
-import com.carrotsearch.hppc.IntFloatHashMap;
-import com.carrotsearch.hppc.IntIntHashMap;
-import com.carrotsearch.hppc.LongFloatHashMap;
-import com.carrotsearch.hppc.LongIntHashMap;
-import com.carrotsearch.hppc.cursors.IntIntCursor;
-import com.carrotsearch.hppc.cursors.LongFloatCursor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The WEASEL-Model as published in
  * <p>
  * Schäfer, P., Leser, U.: Fast and Accurate Time Series
- * Classification with WEASEL." CIKM 2017
+ * Classification with WEASEL. CIKM 2017
  */
 public class WEASEL {
 
@@ -47,9 +44,9 @@ public class WEASEL {
   public WEASEL(){}
 
   /**
-   * Create a WEASEL boss.
+   * Create a WEASEL model.
    *
-   * @param maxF          queryLength of the SFA words
+   * @param maxF          Length of the SFA words
    * @param maxS          alphabet size
    * @param windowLengths the set of window lengths to use for extracting SFA words from
    *                      time series.
@@ -70,13 +67,13 @@ public class WEASEL {
   }
 
   /**
-   * The Weasel-boss: a histogram of SFA word and bi-gram frequencies
+   * The WEASEL-model: a histogram of SFA word and bi-gram frequencies
    */
   public static class BagOfBigrams {
     public IntIntHashMap bob;
-    public String label;
+    public Double label;
 
-    public BagOfBigrams(int size, String label) {
+    public BagOfBigrams(int size, Double label) {
       this.bob = new IntIntHashMap(size);
       this.label = label;
     }
@@ -115,7 +112,8 @@ public class WEASEL {
     // SFA quantization
     if (this.signature[index] == null) {
       this.signature[index] = new SFASupervised();
-      this.signature[index].fitWindowing(samples, this.windowLengths[index], this.maxF, this.alphabetSize, this.normMean, this.lowerBounding);
+      this.signature[index].fitWindowing(
+          samples, this.windowLengths[index], this.maxF, this.alphabetSize, this.normMean, this.lowerBounding);
     }
 
     // create words
@@ -141,11 +139,7 @@ public class WEASEL {
     // FIXME
     //    final long mask = (usedBits << wordLength) - 1L;
     final long mask = (1L << (usedBits * wordLength)) - 1L;
-
-    // TODO rethink bit-shifting to make it collision free?!
-
-    //long max = 0;
-    //long prevMax = 0;
+    int highestBit = Words.binlog(Integer.highestOneBit(Classifier.MAX_WINDOW_LENGTH))+1;
 
     // iterate all samples
     // and create a bag of pattern
@@ -155,22 +149,18 @@ public class WEASEL {
       // create subsequences
       for (int w = 0; w < this.windowLengths.length; w++) {
         for (int offset = 0; offset < words[w][j].length; offset++) {
-          int word = this.dict.getWord((long) w << 32 | (words[w][j][offset] & mask));
+          int word = this.dict.getWord((words[w][j][offset] & mask) << highestBit | (long) w);
           bagOfPatterns[j].bob.putOrAdd(word, 1, 1);
-          //max = Math.max(Long.highestOneBit((words[w][j][offset] & mask)), max);
 
           // add 2 grams
           if (offset - this.windowLengths[w] >= 0) {
-            long prevWord = this.dict.getWord((long) w << 32 | (words[w][j][offset - this.windowLengths[w]] & mask));
-            //prevMax = Math.max(prevWord, Long.highestOneBit(prevMax));
-            int newWord = this.dict.getWord(prevWord << 52 | word);
+            long prevWord = this.dict.getWord((words[w][j][offset - this.windowLengths[w]] & mask) << highestBit | (long) w);
+            int newWord = this.dict.getWord((prevWord << 32 | word ) << highestBit);
             bagOfPatterns[j].bob.putOrAdd(newWord, 1, 1);
           }
         }
       }
     }
-
-    //System.out.println(max + "\t" + prevMax);
 
     return bagOfPatterns;
   }
@@ -180,22 +170,14 @@ public class WEASEL {
    * https://github.com/scikit-learn/scikit-learn/blob/c957249/sklearn/feature_selection/univariate_selection.py#L170
    */
   public void filterChiSquared(final BagOfBigrams[] bob, double chi_limit) {
-    // class frequencies
-    LongIntHashMap classFrequencies = new LongIntHashMap();
-    for (BagOfBigrams ts : bob) {
-      long label = Double.valueOf(ts.label).longValue();
-      classFrequencies.putOrAdd(label, 1, 1);
-    }
-
     // Chi2 Test
     IntIntHashMap featureCount = new IntIntHashMap(bob[0].bob.size());
     LongFloatHashMap classProb = new LongFloatHashMap(10);
     LongIntHashMap observed = new LongIntHashMap(bob[0].bob.size());
-    IntFloatHashMap chiSquare = new IntFloatHashMap(bob[0].bob.size());
 
     // count number of samples with this word
     for (BagOfBigrams bagOfPattern : bob) {
-      long label = Double.valueOf(bagOfPattern.label).longValue();
+      long label = bagOfPattern.label.longValue();
       for (IntIntCursor word : bagOfPattern.bob) {
         if (word.value > 0) {
           featureCount.putOrAdd(word.key, 1, 1);
@@ -207,11 +189,12 @@ public class WEASEL {
 
     // samples per class
     for (BagOfBigrams bagOfPattern : bob) {
-      long label = Double.valueOf(bagOfPattern.label).longValue();
+      long label = bagOfPattern.label.longValue();
       classProb.putOrAdd(label, 1, 1);
     }
 
-    // chi square: observed minus expected occurrence
+    // chi-squared: observed minus expected occurrence
+    IntHashSet chiSquare = new IntHashSet(featureCount.size());
     for (LongFloatCursor prob : classProb) {
       prob.value /= bob.length; // (float) frequencies.get(prob.key);
 
@@ -222,8 +205,8 @@ public class WEASEL {
         float chi = observed.get(key) - expected;
         float newChi = chi * chi / expected;
         if (newChi >= chi_limit
-            && newChi > chiSquare.get(feature.key)) {
-          chiSquare.put(feature.key, newChi);
+            && !chiSquare.contains(feature.key)) {
+          chiSquare.add(feature.key);
         }
       }
     }
@@ -231,13 +214,13 @@ public class WEASEL {
     // best elements above limit
     for (int j = 0; j < bob.length; j++) {
       for (IntIntCursor cursor : bob[j].bob) {
-        if (chiSquare.get(cursor.key) < chi_limit) {
+        if (!chiSquare.contains(cursor.key)) {
           bob[j].bob.values[cursor.index] = 0;
         }
       }
     }
 
-    // chi square reduces keys substantially => remap
+    // chi-squared reduces keys substantially => remap
     this.dict.remap(bob);
   }
 
@@ -293,7 +276,7 @@ public class WEASEL {
     public void remap(final BagOfBigrams[] bagOfPatterns) {
       for (int j = 0; j < bagOfPatterns.length; j++) {
         IntIntHashMap oldMap = bagOfPatterns[j].bob;
-        bagOfPatterns[j].bob = new IntIntHashMap(oldMap.size());
+        bagOfPatterns[j].bob = new IntIntHashMap();
         for (IntIntCursor word : oldMap) {
           if (word.value > 0) {
             bagOfPatterns[j].bob.put(getWordChi(word.key), word.value);

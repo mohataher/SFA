@@ -2,23 +2,14 @@
 // Distributed under the GLP 3.0 (See accompanying file LICENSE)
 package sfa.transformation;
 
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-
-import sfa.classification.Classifier.Words;
-import sfa.timeseries.TimeSeries;
-
 import com.carrotsearch.hppc.ObjectIntHashMap;
 import com.carrotsearch.hppc.cursors.IntCursor;
+import sfa.classification.Classifier.Words;
+import sfa.timeseries.MultiVariateTimeSeries;
+import sfa.timeseries.TimeSeries;
+
+import java.io.*;
+import java.util.*;
 
 /**
  * Symbolic Fourier Approximation as published in
@@ -30,7 +21,7 @@ public class SFA implements Serializable {
   private static final long serialVersionUID = -3903361341617350743L;
 
   // distribution of Fourier values
-  public ArrayList<ValueLabel>[] orderLine;
+  public transient ArrayList<ValueLabel>[] orderLine;
 
   public HistogramType histogramType = HistogramType.EQUI_DEPTH;
 
@@ -52,17 +43,20 @@ public class SFA implements Serializable {
     EQUI_FREQUENCY, EQUI_DEPTH, INFORMATION_GAIN
   }
 
+  // for the MFT classifier
+  private boolean mftUseMaxOrMin = false;
+
   static class ValueLabel implements Serializable {
     private static final long serialVersionUID = 4392333771929261697L;
 
     public double value;
-    public String label;
+    public double label;
 
     public ValueLabel(){}
 
-    public ValueLabel(double key, String label) {
+    public ValueLabel(double key, Double label) {
       this.value = key;
-      this.label = label;
+      this.label = label != null? label : 0;
     }
 
     @Override
@@ -74,8 +68,13 @@ public class SFA implements Serializable {
   public SFA(){}
 
   public SFA(HistogramType histogramType) {
+    this(histogramType, false);
+  }
+
+  public SFA(HistogramType histogramType, boolean mftUseMaxOrMin) {
     reset();
     this.histogramType = histogramType;
+    this.mftUseMaxOrMin = mftUseMaxOrMin;
   }
 
   public void reset() {
@@ -109,7 +108,7 @@ public class SFA implements Serializable {
   /**
    * Transforms a single time series to its SFA word
    *
-   * @param timeSeries
+   * @param timeSeries a sample
    * @return
    */
   public short[] transform(TimeSeries timeSeries) {
@@ -119,7 +118,7 @@ public class SFA implements Serializable {
   /**
    * Transforms a single time series to its SFA word
    *
-   * @param timeSeries
+   * @param timeSeries a sample
    * @param approximation the DFT approximation, if available, else pass 'null'
    * @return
    */
@@ -157,7 +156,7 @@ public class SFA implements Serializable {
   /**
    * Transforms a set of time series to SFA words.
    *
-   * @param samples
+   * @param samples a set of samples
    * @param approximation the DFT approximations, if available, else pass 'null'
    * @return
    */
@@ -227,26 +226,52 @@ public class SFA implements Serializable {
           if (comp != 0) {
             return comp;
           }
-          return o1.label != null ? o1.label.compareTo(o2.label) : 0;
+          return Double.compare(o1.label,o2.label);
         }
       });
     }
   }
 
   /**
+   * Extracts sliding windows from the multivariate time series and
+   * trains SFA based on the sliding windows.
+   * At the end of this call, the quantization bins are set.
+   *
+   * @param mts          A set of multivariate sample time series
+   * @param windowLength The queryLength of each sliding window
+   * @param wordLength   the SFA word-queryLength
+   * @param symbols      the SFA alphabet size
+   * @param normMean     if set, the mean is subtracted from each sliding window
+   */
+  public void fitWindowing(
+      MultiVariateTimeSeries[] mts, int windowLength, int wordLength, int symbols, boolean normMean, boolean lowerBounding) {
+    ArrayList<TimeSeries> sa = new ArrayList<TimeSeries>(
+        mts.length * mts[0].getDimensions() * mts[0].timeSeries[0].getLength() / windowLength);
+
+    for (MultiVariateTimeSeries timeSeries : mts) {
+      for (TimeSeries t : timeSeries.timeSeries) {
+        sa.addAll(Arrays.asList(t.getDisjointSequences(windowLength, normMean)));
+      }
+    }
+    fitWindowing(sa.toArray(new TimeSeries[]{}), windowLength, wordLength, symbols, normMean, lowerBounding);
+  }
+
+  /**
    * Extracts sliding windows from the time series and trains SFA based on the sliding windows.
    * At the end of this call, the quantization bins are set.
    *
-   * @param timeSeries
+   * @param timeSeries   A set of samples
    * @param windowLength The queryLength of each sliding window
    * @param wordLength   the SFA word-queryLength
    * @param symbols      the SFA alphabet size
    * @param normMean     if set, the mean is subtracted from each sliding window
    */
   public void fitWindowing(TimeSeries[] timeSeries, int windowLength, int wordLength, int symbols, boolean normMean, boolean lowerBounding) {
-    this.transformation = new MFT(windowLength, normMean, lowerBounding);
+    this.transformation = new MFT(windowLength, normMean, lowerBounding, this.mftUseMaxOrMin);
 
-    ArrayList<TimeSeries> sa = new ArrayList<>(timeSeries.length * timeSeries[0].getLength() / windowLength);
+    ArrayList<TimeSeries> sa = new ArrayList<>(
+        timeSeries.length * timeSeries[0].getLength() / windowLength);
+
     for (TimeSeries t : timeSeries) {
       sa.addAll(Arrays.asList(t.getDisjointSequences(windowLength, normMean)));
     }
@@ -260,11 +285,11 @@ public class SFA implements Serializable {
    * Returns the SFA words as short[] (from Fourier transformed windows). Each
    * short corresponds to one character.
    *
-   * @param ts
+   * @param timeSeries a sample
    * @return
    */
-  public short[][] transformWindowing(TimeSeries ts) {
-    double[][] mft = this.transformation.transformWindowing(ts, this.maxWordLength);
+  public short[][] transformWindowing(TimeSeries timeSeries) {
+    double[][] mft = this.transformation.transformWindowing(timeSeries, this.maxWordLength);
 
     short[][] words = new short[mft.length][];
     for (int i = 0; i < mft.length; i++) {
@@ -280,11 +305,11 @@ public class SFA implements Serializable {
    * <p>
    * Returns the Fourier transformed windows.
    *
-   * @param ts
+   * @param timeSeries a sample
    * @return
    */
-  public double[][] transformWindowingDouble(TimeSeries ts) {
-    return this.transformation.transformWindowing(ts, this.maxWordLength);
+  public double[][] transformWindowingDouble(TimeSeries timeSeries) {
+    return this.transformation.transformWindowing(timeSeries, this.maxWordLength);
   }
 
   /**
@@ -325,8 +350,8 @@ public class SFA implements Serializable {
     if (!this.initialized) {
       init(wordLength, symbols);
 
-      if (this.transformation == null) { // TODO!!
-        this.transformation = new MFT(samples[0].getLength(), normMean, this.lowerBounding);
+      if (this.transformation == null) {
+        this.transformation = new MFT(samples[0].getLength(), normMean, this.lowerBounding, this.mftUseMaxOrMin);
       }
     }
 
@@ -339,6 +364,8 @@ public class SFA implements Serializable {
     } else if (this.histogramType == HistogramType.INFORMATION_GAIN) {
       divideHistogramInformationGain();
     }
+
+    this.orderLine = null;
 
     return transformedSamples;
   }
@@ -354,7 +381,7 @@ public class SFA implements Serializable {
   /**
    * Fills data in the orderline
    *
-   * @param samples
+   * @param samples A set of samples
    */
   protected double[][] fillOrderline(TimeSeries[] samples, int l) {
     double[][] transformedSamples = new double[samples.length][];
@@ -442,7 +469,7 @@ public class SFA implements Serializable {
     }
   }
 
-  protected static double entropy(ObjectIntHashMap<String> frequency, double total) {
+  protected static double entropy(ObjectIntHashMap<Double> frequency, double total) {
     double entropy = 0;
     double log2 = 1.0 / Math.log(2.0);
     for (IntCursor element : frequency.values()) {
@@ -455,7 +482,7 @@ public class SFA implements Serializable {
   }
 
   protected static double calculateInformationGain(
-      ObjectIntHashMap<String> cIn, ObjectIntHashMap<String> cOut,
+      ObjectIntHashMap<Double> cIn, ObjectIntHashMap<Double> cOut,
       double class_entropy,
       double total_c_in,
       double total) {
@@ -478,19 +505,19 @@ public class SFA implements Serializable {
 
     // class entropy
     int total = end - start;
-    ObjectIntHashMap<String> cIn = new ObjectIntHashMap<>();
-    ObjectIntHashMap<String> cOut = new ObjectIntHashMap<>();
+    ObjectIntHashMap<Double> cIn = new ObjectIntHashMap<>();
+    ObjectIntHashMap<Double> cOut = new ObjectIntHashMap<>();
     for (int pos = start; pos < end; pos++) {
       cOut.putOrAdd(element.get(pos).label, 1, 1);
     }
     double class_entropy = entropy(cOut, total);
 
     int i = start;
-    String lastLabel = element.get(i).label;
+    Double lastLabel = element.get(i).label;
     i += moveElement(element, cIn, cOut, start);
 
     for (int split = start + 1; split < end - 1; split++) {
-      String label = element.get(i).label;
+      Double label = element.get(i).label;
       i += moveElement(element, cIn, cOut, split);
 
       // only inspect changes of the label
@@ -527,7 +554,7 @@ public class SFA implements Serializable {
 
   protected int moveElement(
       List<ValueLabel> element,
-      ObjectIntHashMap<String> cIn, ObjectIntHashMap<String> cOut,
+      ObjectIntHashMap<Double> cIn, ObjectIntHashMap<Double> cOut,
       int pos) {
     cIn.putOrAdd(element.get(pos).label, 1, 1);
     cOut.putOrAdd(element.get(pos).label, -1, -1);
